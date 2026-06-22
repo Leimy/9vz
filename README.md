@@ -26,19 +26,38 @@ Requirements
   * Go toolchain
   * Apple command line tools (for codesign)
 
+Building
+--------
 Virtualization.framework refuses unsigned clients: the binary
 must carry the com.apple.security.virtualization entitlement.
-The Makefile handles this with an ad-hoc signature:
+The Makefile builds and applies an ad-hoc signature; it does
+nothing else (no launcher targets -- run ./9vz directly):
 
     make deps        # once: fetch Code-Hex/vz and x/sys
     make build       # go build && codesign --entitlements
                      #   vz.entitlements -s - 9vz
+    make clean       # remove the binary and efistore.bin
 
 Usage
 -----
+Run the signed binary directly, passing flags.  A normal serial
+boot of a 9front guest:
+
     ./9vz -kernel 9vz.bin -disk 9front.raw -cmdline 'console=0
     *ncpu=1
     nobootprompt=local!/dev/sdF0/fs'
+
+The same boot with a graphics window (virtio-gpu + USB keyboard
+and mouse) in addition to the serial console:
+
+    ./9vz -gui -kernel 9vz.bin -disk 9front.raw -cmdline 'console=0
+    *ncpu=1
+    nobootprompt=local!/dev/sdF0/fs'
+
+Sanity-check the VZ serial plumbing with an EFI firmware boot
+(EDK2 prints its banner even with nothing bootable):
+
+    ./9vz -efi -disk 9front.raw
 
 Flags:
 
@@ -61,6 +80,35 @@ Flags:
                     (sanity-check path; EDK2 prints on the serial
                     console even with nothing bootable)
     -efistore path  EFI variable store (created if missing)
+    -gui            open a graphics window: attaches a virtio-gpu
+                    device (single scanout), a USB keyboard and a
+                    USB absolute-coordinate pointing device, and
+                    hands the VM to AppKit's run loop.  The serial
+                    console still flows on stdio in parallel.  The
+                    guest needs drivers for these devices to use
+                    them (see "Native graphics" below).
+    -width  px      graphics window/scanout width  (default 1440)
+    -height px      graphics window/scanout height (default 900)
+
+                    The default is a 16:10 laptop-native shape
+                    (1440x900) rather than a 4:3 one.  The guest
+                    kernel adopts the host scanout size via the
+                    virtio-gpu GET_DISPLAY_INFO reply, so it
+                    follows -width/-height automatically.
+
+Mouse buttons on a laptop trackpad (-gui)
+-----------------------------------------
+A bare trackpad only has one (left) button, which the guest sees
+as Plan 9 button 1.  An earlier host-side experiment remapped
+Option-click to button 2 and Command-click to button 3 via a
+CoreGraphics event tap (the drawterm trick).  It worked for
+modifier-before-click but never reliably formed the button-1
+chords rio needs for paste, and a session-wide tap risks
+interfering with real hardware mice.  It has been rolled back:
+9vz now passes all clicks straight through.
+
+To reach rio's button 2 and 3 chords, use a real multi-button
+mouse or trackball -- those buttons reach the guest unmodified.
 
 Ctrl-C once requests a graceful stop; twice forces exit.
 
@@ -110,6 +158,9 @@ wrapper before booting:
     dd if=9vz.u of=9vz.bin bs=64 skip=1
     ./9vz -kernel 9vz.bin ...
 
+(NOTE: newer vz64 kernels do this step to generate 9vz.bin for
+you via the mkfile)
+
 For kernels that lack the header, mkarm64hdr.py can prepend one
 (that was the original bring-up path; the embedded header made
 it obsolete -- the script refuses to double-wrap and will exit
@@ -127,15 +178,75 @@ See the vz64 repository's NOTES for the full cpu/auth conversion
 recipe, and remember fshalt in the guest before Ctrl-C -- hjfs
 buffers writes.
 
+Native graphics (work in progress)
+----------------------------------
+The -gui flag wires up the host half of a native graphics path,
+so a 9front guest could eventually run rio directly in a macOS
+window instead of via drawterm.  The split is deliberately
+lopsided: the host side is nearly free, the guest side is a
+driver port.
+
+Status at a glance:
+
+  [done]    host side: -gui wiring in main.go (builds and signs
+            cleanly)
+  [TODO]    smoke test: boot a stock Linux arm64 kernel under
+            -gui and confirm a console paints in the window
+            (proves the host path with zero kernel work)
+  [TODO]    guest side: virtio-gpu driver in the vz64 kernel
+  [TODO]    guest side: framebuffer hookup (flushmemscreen)
+  [TODO]    guest side: keyboard/mouse input drivers
+
+Host side (this repo, done):
+
+  * virtio-gpu device with one scanout (VZ allows at most one),
+    sized by -width/-height.  This is the paravirtual GPU from
+    the Virtio GPU Device specification -- the same device a
+    Linux guest would drive.
+  * USB keyboard and USB absolute-coordinate pointing device,
+    delivered to the guest as USB HID.
+  * a real Cocoa window (VZVirtualMachineView) with a toolbar
+    (pause/resume/power/zoom), driven by AppKit's run loop.  In
+    -gui mode StartGraphicApplication owns the main OS thread;
+    the serial/state loop moves to a goroutine so stdio keeps
+    working.
+
+The next step before any kernel work is the smoke test: boot a
+stock Linux arm64 kernel under -gui.  If a Linux console paints
+in the window, the whole host path (virtio-gpu + window + input)
+is proven good -- the same "boot Linux to survey VZ" instrument
+the original port leaned on.  Only then is it worth writing the
+guest driver against a known-good window.
+
+Guest side (vz64 kernel, not started):
+
+  1. a virtio-gpu driver doing the virtio 1.0 handshake (crib
+     the structure from uartvz.c), then driving the control
+     queue: GET_DISPLAY_INFO, RESOURCE_CREATE_2D,
+     RESOURCE_ATTACH_BACKING (pointed at the Plan 9
+     framebuffer pages), SET_SCANOUT, and TRANSFER_TO_HOST_2D +
+     RESOURCE_FLUSH on update.
+  2. hooking that into the soft-framebuffer screen path so
+     flushmemscreen issues the transfer/flush for the dirty
+     rectangle the draw layer already tracks.
+  3. virtio/USB input drivers feeding /dev/kbd and /dev/mouse
+     from the VZ keyboard and pointing devices.
+
+Until (1)-(3) land, -gui opens a black window but the serial
+console (and drawterm) work exactly as before.
+
 Files
 -----
-    main.go            the harness (boot loaders, devices, signal
-                       and state loop)
+    main.go            the harness (boot loaders, devices, the
+                       -gui graphics/input wiring, signal and
+                       state loop)
     termios_darwin.go  raw-mode ioctl constants
+    (mouse_darwin.go removed -- modifier-click button remap rolled back)
     vz.entitlements    com.apple.security.virtualization
     check_kernel.sh    arm64 Image header inspector
     mkarm64hdr.py      legacy header prepender (obsolete for the
                        vz64 kernel, kept for other kernels)
-    Makefile           deps / build+sign / run / run-efi
+    Makefile           deps / build+sign / clean (build only --
+                       run ./9vz directly)
     HISTORY.md         the original pre-port phase plan
     9front-on-vz.md    additional notes

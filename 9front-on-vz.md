@@ -203,9 +203,37 @@ VM" rather than passing it through (Plan 9's interrupt key is DEL, which
 mostly hides this); the console getc path busy-waits (fine for rdb, not
 pretty); guest RAM is capped at 2GB by the address-space layout; SMP is
 untested (secondary CPU bring-up under VZ's PSCI needs verification);
-graphics don't exist (correct for now — drawterm is the Plan 9 answer);
-and the port directory duplicates arm64 wholesale rather than sharing
-sources, which upstream may want restructured.
+native graphics are half-built (the host side exists — see "Native
+graphics" below — but the guest has no virtio-gpu driver yet, so drawterm
+remains the working answer); and the port directory duplicates arm64
+wholesale rather than sharing sources, which upstream may want
+restructured.
+
+## Native graphics
+
+The harness grew a `-gui` mode that attaches a virtio-gpu device (one
+scanout), a USB keyboard and a USB pointing device, and hands the VM to
+AppKit's run loop so it appears in a real macOS window — all from the
+Code-Hex/vz bindings, which already ship the Cocoa `VZVirtualMachineView`
+and a `StartGraphicApplication` entry point. The serial console keeps
+flowing on stdio in parallel. This is the host half of letting a 9front
+guest run rio natively instead of over drawterm.
+
+The split is lopsided in the host's favour. The Mac side is wiring, done.
+The guest side is a driver port, not started: the vz64 kernel needs a
+virtio-gpu driver (same virtio 1.0 handshake as uartvz.c, then the GPU
+control queue — GET_DISPLAY_INFO, RESOURCE_CREATE_2D,
+RESOURCE_ATTACH_BACKING against the Plan 9 framebuffer, SET_SCANOUT,
+TRANSFER_TO_HOST_2D + RESOURCE_FLUSH), a hook into the soft-framebuffer
+`flushmemscreen` path, and input drivers feeding /dev/kbd and /dev/mouse.
+Until those land, `-gui` opens a black window.
+
+The disciplined next step, before any kernel work, is to boot a stock
+Linux arm64 kernel under `-gui` and watch its console paint in the window
+— proving the virtio-gpu/window/input plumbing end to end with zero 9front
+code, exactly the "boot Linux to survey VZ" instrument that carried the
+original bring-up. The guest driver then gets written against a known-good
+window rather than into the dark.
 
 ## What's next
 
@@ -223,3 +251,19 @@ services, the pieces are already on the bench.
 And independently of all that: a `uartvirtio10` console driver and a VZ
 machine port are upstream-worthy contributions to 9front. The mailing list
 would plausibly enjoy the screenshot.
+
+## Resume here (graphics)
+
+For whoever picks this up next, the immediate to-do list:
+
+1. Smoke-test the host path: `./9vz -gui -kernel <linux-arm64-Image>
+   -disk <linux.raw> -cmdline '...'` and confirm the Linux console paints
+   in the window. No 9front code involved; this validates virtio-gpu +
+   window + input.
+2. Only then, write the vz64 virtio-gpu driver (see "Native graphics").
+   Crib the virtio 1.0 handshake from `uartvz.c`.
+3. Hook it into `flushmemscreen`; bring up `/dev/kbd` and `/dev/mouse`.
+
+The host half (`-gui` in `main.go`) is committed and builds cleanly. A
+stray `-lobjc` duplicate-library linker *warning* during `go build` comes
+from the upstream bindings' cgo LDFLAGS, not this tree; it is harmless.
