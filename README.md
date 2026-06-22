@@ -51,7 +51,6 @@ The same boot with a graphics window (virtio-gpu + USB keyboard
 and mouse) in addition to the serial console:
 
     ./9vz -gui -kernel 9vz.bin -disk 9front.raw -cmdline 'console=0
-    *ncpu=1
     nobootprompt=local!/dev/sdF0/fs'
 
 Sanity-check the VZ serial plumbing with an EFI firmware boot
@@ -71,9 +70,7 @@ Flags:
     -disk path      RAW disk image attached as virtio-blk
                     (convert qcow2 with qemu-img convert first)
     -ro             attach the disk read-only
-    -cpus n         virtual cpu count (default 2; the vz64 kernel
-                    is single-cpu for now -- pass *ncpu=1 in the
-                    cmdline until SMP lands)
+    -cpus n         virtual cpu count (default 2)
     -mem GiB        guest memory (default 2)
     -nonet          disable the NAT network device
     -efi            boot EFI firmware instead of a direct kernel
@@ -107,8 +104,9 @@ chords rio needs for paste, and a session-wide tap risks
 interfering with real hardware mice.  It has been rolled back:
 9vz now passes all clicks straight through.
 
-To reach rio's button 2 and 3 chords, use a real multi-button
-mouse or trackball -- those buttons reach the guest unmodified.
+Mouse chording presently does not work through the graphics
+console, but will over drawterm connections.  Feedback submitted
+to Apple for review, but won't hold my breath.
 
 Ctrl-C once requests a graceful stop; twice forces exit.
 
@@ -161,11 +159,6 @@ wrapper before booting:
 (NOTE: newer vz64 kernels do this step to generate 9vz.bin for
 you via the mkfile)
 
-For kernels that lack the header, mkarm64hdr.py can prepend one
-(that was the original bring-up path; the embedded header made
-it obsolete -- the script refuses to double-wrap and will exit
-if the magic is already present).
-
 Getting a useful guest
 ----------------------
 The serial rc prompt works out of the box.  For graphics, run
@@ -190,12 +183,6 @@ Status at a glance:
 
   [done]    host side: -gui wiring in main.go (builds and signs
             cleanly)
-  [TODO]    smoke test: boot a stock Linux arm64 kernel under
-            -gui and confirm a console paints in the window
-            (proves the host path with zero kernel work)
-  [TODO]    guest side: virtio-gpu driver in the vz64 kernel
-  [TODO]    guest side: framebuffer hookup (flushmemscreen)
-  [TODO]    guest side: keyboard/mouse input drivers
 
 Host side (this repo, done):
 
@@ -211,41 +198,14 @@ Host side (this repo, done):
     the serial/state loop moves to a goroutine so stdio keeps
     working.
 
-The next step before any kernel work is the smoke test: boot a
-stock Linux arm64 kernel under -gui.  If a Linux console paints
-in the window, the whole host path (virtio-gpu + window + input)
-is proven good -- the same "boot Linux to survey VZ" instrument
-the original port leaned on.  Only then is it worth writing the
-guest driver against a known-good window.
-
-Guest side (vz64 kernel, not started):
-
-  1. a virtio-gpu driver doing the virtio 1.0 handshake (crib
-     the structure from uartvz.c), then driving the control
-     queue: GET_DISPLAY_INFO, RESOURCE_CREATE_2D,
-     RESOURCE_ATTACH_BACKING (pointed at the Plan 9
-     framebuffer pages), SET_SCANOUT, and TRANSFER_TO_HOST_2D +
-     RESOURCE_FLUSH on update.
-  2. hooking that into the soft-framebuffer screen path so
-     flushmemscreen issues the transfer/flush for the dirty
-     rectangle the draw layer already tracks.
-  3. virtio/USB input drivers feeding /dev/kbd and /dev/mouse
-     from the VZ keyboard and pointing devices.
-
-Until (1)-(3) land, -gui opens a black window but the serial
-console (and drawterm) work exactly as before.
-
 Files
 -----
     main.go            the harness (boot loaders, devices, the
                        -gui graphics/input wiring, signal and
                        state loop)
     termios_darwin.go  raw-mode ioctl constants
-    (mouse_darwin.go removed -- modifier-click button remap rolled back)
     vz.entitlements    com.apple.security.virtualization
     check_kernel.sh    arm64 Image header inspector
-    mkarm64hdr.py      legacy header prepender (obsolete for the
-                       vz64 kernel, kept for other kernels)
     Makefile           deps / build+sign / clean (build only --
                        run ./9vz directly)
     HISTORY.md         the original pre-port phase plan

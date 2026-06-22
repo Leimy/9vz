@@ -201,13 +201,12 @@ delivered retroactively, CPU listener, drawterm in from the host.
 Rough edges, in rough priority order: the harness traps Ctrl-C as "stop the
 VM" rather than passing it through (Plan 9's interrupt key is DEL, which
 mostly hides this); the console getc path busy-waits (fine for rdb, not
-pretty); guest RAM is capped at 2GB by the address-space layout; SMP is
-untested (secondary CPU bring-up under VZ's PSCI needs verification);
-native graphics are half-built (the host side exists — see "Native
-graphics" below — but the guest has no virtio-gpu driver yet, so drawterm
-remains the working answer); and the port directory duplicates arm64
-wholesale rather than sharing sources, which upstream may want
-restructured.
+pretty); guest RAM is capped at 2GB by the address-space layout.
+
+SMP works up to 10 CPU cores on my M5 Macbook Air.
+
+GUI works, but no button chords functional 100% due to some oddities
+in the virtualization framework.
 
 ## Native graphics
 
@@ -219,21 +218,8 @@ and a `StartGraphicApplication` entry point. The serial console keeps
 flowing on stdio in parallel. This is the host half of letting a 9front
 guest run rio natively instead of over drawterm.
 
-The split is lopsided in the host's favour. The Mac side is wiring, done.
-The guest side is a driver port, not started: the vz64 kernel needs a
-virtio-gpu driver (same virtio 1.0 handshake as uartvz.c, then the GPU
-control queue — GET_DISPLAY_INFO, RESOURCE_CREATE_2D,
-RESOURCE_ATTACH_BACKING against the Plan 9 framebuffer, SET_SCANOUT,
-TRANSFER_TO_HOST_2D + RESOURCE_FLUSH), a hook into the soft-framebuffer
-`flushmemscreen` path, and input drivers feeding /dev/kbd and /dev/mouse.
-Until those land, `-gui` opens a black window.
-
-The disciplined next step, before any kernel work, is to boot a stock
-Linux arm64 kernel under `-gui` and watch its console paint in the window
-— proving the virtio-gpu/window/input plumbing end to end with zero 9front
-code, exactly the "boot Linux to survey VZ" instrument that carried the
-original bring-up. The guest driver then gets written against a known-good
-window rather than into the dark.
+The split is lopsided in the host's favor. The Mac side is wiring, done.
+The guest side is a driver port, which is working pretty well now.
 
 ## What's next
 
