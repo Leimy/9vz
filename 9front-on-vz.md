@@ -136,9 +136,14 @@ A single-file Go program over the Code-Hex/vz bindings. It configures a
 VZLinuxBootLoader (kernel, optional initrd, command line) or optionally EFI
 firmware, attaches a raw disk as virtio-blk, NAT virtio-net, entropy, a
 vsock device (idle for now, reserved for the future control plane), and a
-virtio-console serial port wired to the terminal in raw mode. Build is
-`go build` plus `codesign` with the `com.apple.security.virtualization`
-entitlement. Ctrl-C requests a stop; twice forces exit.
+virtio-console serial port wired to the terminal in raw mode. Dependencies
+(the Code-Hex/vz bindings and x/sys) are vendored and pinned, so the build is
+`go build -mod=vendor` plus `codesign` with the
+`com.apple.security.virtualization` entitlement -- all wrapped by `make build`.
+The vendored vz bindings carry two local edits (applied by patches/apply.sh
+during `make vendor`): the VZVirtualMachineView's automaticallyReconfiguresDisplay
+is turned off so the `-scale` HiDPI scanout actually sticks, and the window
+starts fullscreen. Ctrl-C requests a stop; twice forces exit.
 
 The same harness boots stock Linux — which is not a side feature but a
 debugging instrument: it's how the hardware survey was done, and it remains
@@ -205,8 +210,15 @@ pretty); guest RAM is capped at 2GB by the address-space layout.
 
 SMP works up to 10 CPU cores on my M5 Macbook Air.
 
-GUI works, but no button chords functional 100% due to some oddities
-in the virtualization framework.
+The -gui native graphics path works (the guest paints, takes keyboard, and
+takes single mouse clicks).  The one unresolved limitation is multi-button
+mouse CHORDING on the native console: Apple's only non-macOS pointing device
+is a USB digitizer that drops a held button the instant a second is pressed,
+so acme-style cut/paste chords never form there.  This was traced to the
+device at three layers across two guest OSes (it is not a 9vz or 9front bug);
+drawterm still chords correctly because it bypasses the device.  Full writeup:
+https://gist.github.com/Leimy/bc02c6fc56c1a76020139f44496b003a  (see also the
+README "Mouse buttons / chording" section).
 
 ## Native graphics
 
@@ -238,18 +250,25 @@ And independently of all that: a `uartvirtio10` console driver and a VZ
 machine port are upstream-worthy contributions to 9front. The mailing list
 would plausibly enjoy the screenshot.
 
-## Resume here (graphics)
+## State of graphics (mostly done)
 
-For whoever picks this up next, the immediate to-do list:
+Native graphics is up: the vz64 virtio-gpu driver paints, and `/dev/kbd` and
+`/dev/mouse` work for keyboard and single clicks.  The host path (`-gui` in
+`main.go`) plus the guest driver were validated against both Linux and 9front
+guests.  The virtio 1.0 handshake in the guest GPU driver was cribbed from
+`uartvz.c`, as planned.
 
-1. Smoke-test the host path: `./9vz -gui -kernel <linux-arm64-Image>
-   -disk <linux.raw> -cmdline '...'` and confirm the Linux console paints
-   in the window. No 9front code involved; this validates virtio-gpu +
-   window + input.
-2. Only then, write the vz64 virtio-gpu driver (see "Native graphics").
-   Crib the virtio 1.0 handshake from `uartvz.c`.
-3. Hook it into `flushmemscreen`; bring up `/dev/kbd` and `/dev/mouse`.
+What remains, in priority order:
 
-The host half (`-gui` in `main.go`) is committed and builds cleanly. A
-stray `-lobjc` duplicate-library linker *warning* during `go build` comes
-from the upstream bindings' cgo LDFLAGS, not this tree; it is harmless.
+1. Multi-button CHORDING on the native console -- the one open item.  This is
+   an Apple Virtualization.framework limitation (the virtual USB digitizer
+   drops a held button when a second is pressed), not a missing driver; it is
+   not fixable in 9vz or 9front.  See the "Native graphics" /
+   "Current state" notes above and the gist.  The achievable workaround is
+   guest-side modifier synthesis (Option/Command -> button 2/3 into
+   /dev/mousein), not yet implemented.
+2. HiDPI ergonomics: handled host-side via `-scale` (smaller scanout, upscaled)
+   plus a fullscreen window; see the README.  No guest change needed.
+
+Note: a stray `-lobjc` duplicate-library linker *warning* during the build
+comes from the upstream bindings' cgo LDFLAGS, not this tree; it is harmless.

@@ -1,0 +1,15 @@
+# github.com/Code-Hex/go-infinity-channel v1.0.0
+## explicit; go 1.18
+github.com/Code-Hex/go-infinity-channel
+# github.com/Code-Hex/vz/v3 v3.7.1
+## explicit; go 1.22.0
+github.com/Code-Hex/vz/v3
+github.com/Code-Hex/vz/v3/internal/objc
+github.com/Code-Hex/vz/v3/internal/progress
+github.com/Code-Hex/vz/v3/internal/sliceutil
+# golang.org/x/mod v0.22.0
+## explicit; go 1.22.0
+golang.org/x/mod/semver
+# golang.org/x/sys v0.46.0
+## explicit; go 1.25.0
+golang.org/x/sys/unix

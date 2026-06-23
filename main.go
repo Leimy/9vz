@@ -51,8 +51,36 @@ var (
 	// gives rio a roomier, modern shape.  The guest kernel adopts the
 	// host scanout size via GET_DISPLAY_INFO, so no kernel change is
 	// needed to follow this; override with -width/-height if desired.
-	width  = flag.Int("width", 1440, "graphics window width in pixels (-gui)")
-	height = flag.Int("height", 900, "graphics window height in pixels (-gui)")
+	// These set the initial window size AND the guest scanout size (the
+	// latter divided by -scale).  The window starts fullscreen by default, so
+	// these mainly fix the display aspect ratio and the guest's pixel grid;
+	// set 9VZ_NOFULLSCREEN=1 to keep a real window of this size.
+	width  = flag.Int("width", 1440, "graphics width (-gui): window size and, /scale, the guest scanout")
+	height = flag.Int("height", 900, "graphics height (-gui): window size and, /scale, the guest scanout")
+	// HiDPI / font-size scaling for the -gui console.
+	//
+	// The guest (9front rio, or a Linux text console) draws 1:1 into the
+	// virtio-gpu scanout's PIXEL grid; it has no notion of display DPI.  On a
+	// Retina panel a 1440x900 scanout is packed into a small physical area,
+	// so everything -- notably the Alpine text-console font -- looks tiny.
+	//
+	// There is no per-display DPI knob for a non-macOS guest in VZ, so we get
+	// "HiDPI" the only way the architecture allows: make the guest render
+	// FEWER pixels and let the VZVirtualMachineView upscale them to fill the
+	// window.  With -scale 2 the scanout becomes width/2 x height/2; the guest
+	// draws into that smaller grid and the host stretches each guest pixel to
+	// a 2x2 block, so the font (and everything else) is twice as large.  The
+	// window keeps its -width/-height logical size; only the guest's pixel
+	// density changes.  scale=1 is the historical 1:1 behavior.
+	//
+	// IMPORTANT: for this to take effect the VZ view's
+	// automaticallyReconfiguresDisplay must be OFF.  Upstream Code-Hex/vz
+	// turns it ON (macOS 14+), which resizes the guest display to the view's
+	// backing-pixel size and silently overrides this scanout -- that was why
+	// an earlier -scale "did nothing".  Our vendored copy is patched to set it
+	// to NO (by patches/apply.sh), so the scanout size below actually sticks
+	// and is upscaled by the (now fullscreen) view.
+	scale = flag.Float64("scale", 1, "HiDPI scale factor for -gui: guest renders at width/scale x height/scale and the window upscales it (>1 = bigger font)")
 )
 
 // AppKit (NSApplication / [NSApp run], used by StartGraphicApplication in
@@ -168,7 +196,28 @@ func main() {
 		if err != nil {
 			log.Fatalf("virtio-gpu: %v", err)
 		}
-		scanout, err := vz.NewVirtioGraphicsScanoutConfiguration(int64(*width), int64(*height))
+		// Derive the guest scanout (pixel) size from the window size and the
+		// HiDPI scale factor.  scale>1 shrinks the scanout so the host view
+		// upscales it -> larger on-screen font.  Clamp to a sane minimum so a
+		// silly scale can't produce a 0- or 1-pixel framebuffer that fails
+		// validation.
+		if *scale < 1 {
+			log.Printf("warning: -scale %g < 1 makes the font smaller; clamping to 1", *scale)
+			*scale = 1
+		}
+		sw := int64(float64(*width) / *scale)
+		sh := int64(float64(*height) / *scale)
+		if sw < 64 {
+			sw = 64
+		}
+		if sh < 64 {
+			sh = 64
+		}
+		if *scale != 1 {
+			log.Printf("gui: window %dx%d, guest scanout %dx%d (scale %g)",
+				*width, *height, sw, sh, *scale)
+		}
+		scanout, err := vz.NewVirtioGraphicsScanoutConfiguration(sw, sh)
 		if err != nil {
 			log.Fatalf("graphics scanout: %v", err)
 		}
