@@ -52,9 +52,12 @@ var (
 	// host scanout size via GET_DISPLAY_INFO, so no kernel change is
 	// needed to follow this; override with -width/-height if desired.
 	// These set the initial window size AND the guest scanout size (the
-	// latter divided by -scale).  The window starts fullscreen by default, so
-	// these mainly fix the display aspect ratio and the guest's pixel grid;
-	// set 9VZ_NOFULLSCREEN=1 to keep a real window of this size.
+	// latter divided by -scale).  The window TRIES to start fullscreen (NOT
+	// WORKING YET -- it only maximizes over the current desktop, not a real
+	// fullscreen Space; see the README "Fullscreen window" and
+	// /usr/dave/9vz-audio-and-fullscreen.md section (a)), so these mainly fix
+	// the display aspect ratio and the guest's pixel grid; set
+	// 9VZ_NOFULLSCREEN=1 to keep a plain window of this size.
 	width  = flag.Int("width", 1440, "graphics width (-gui): window size and, /scale, the guest scanout")
 	height = flag.Int("height", 900, "graphics height (-gui): window size and, /scale, the guest scanout")
 	// HiDPI / font-size scaling for the -gui console.
@@ -79,7 +82,8 @@ var (
 	// backing-pixel size and silently overrides this scanout -- that was why
 	// an earlier -scale "did nothing".  Our vendored copy is patched to set it
 	// to NO (by patches/apply.sh), so the scanout size below actually sticks
-	// and is upscaled by the (now fullscreen) view.
+	// and is upscaled by the view.  (A real fullscreen Space for that view is
+	// attempted but NOT WORKING YET; see the README "Fullscreen window".)
 	scale = flag.Float64("scale", 1, "HiDPI scale factor for -gui: guest renders at width/scale x height/scale and the window upscales it (>1 = bigger font)")
 )
 

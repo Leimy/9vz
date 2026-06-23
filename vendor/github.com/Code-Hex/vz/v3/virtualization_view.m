@@ -10,20 +10,18 @@
 
 - (void)run
 {
+    // 9vz: use AppKit's own run loop ([super run]) instead of a hand-rolled
+    // nextEventMatchingMask do/while.  The native fullscreen *Space*
+    // transition (-toggleFullScreen:) is animated and driven by Core Animation
+    // transactions and run-loop observers on the main thread; a bare
+    // nextEventMatchingMask loop in NSDefaultRunLoopMode services events but
+    // does NOT drive that machinery, so the window only got resized to cover
+    // the screen instead of moving onto its own fullscreen Space.  Letting
+    // AppKit own the loop makes -toggleFullScreen: do the real transition.
+    // Teardown is handled in -terminate: via [super stop:] + a dummy event.
     @autoreleasepool {
-        [self finishLaunching];
-
         shouldKeepRunning = YES;
-        do {
-            NSEvent *event = [self
-                nextEventMatchingMask:NSEventMaskAny
-                            untilDate:[NSDate distantFuture]
-                               inMode:NSDefaultRunLoopMode
-                              dequeue:YES];
-            // NSLog(@"event: %@", event);
-            [self sendEvent:event];
-            [self updateWindows];
-        } while (shouldKeepRunning);
+        [super run];
     }
 }
 
@@ -37,9 +35,20 @@
     //     postNotificationName:NSApplicationWillTerminateNotification
     //                   object:NSApp];
 
-    // This method is used to end up the event loop.
-    // If no events are coming, the event loop will always be in a waiting state.
-    [self postEvent:self.currentEvent atStart:NO];
+    // 9vz: -[NSApplication stop:] only takes effect after the current event is
+    // handled, so post a dummy event to wake the run loop if it is idle in
+    // nextEventMatchingMask.  Together these end [super run] cleanly.
+    [super stop:sender];
+    NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                       location:NSZeroPoint
+                                  modifierFlags:0
+                                      timestamp:0
+                                   windowNumber:0
+                                        context:nil
+                                        subtype:0
+                                          data1:0
+                                          data2:0];
+    [self postEvent:wake atStart:YES];
 }
 @end
 
@@ -396,6 +405,20 @@ static NSString *const Space2ToolbarIdentifier = @"Space2";
     // See: https://stackoverflow.com/questions/62739862/why-doesnt-activateignoringotherapps-enable-the-menu-bar
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     [NSApp activateIgnoringOtherApps:YES];
+
+    // 9vz: start the VM window fullscreen.  The windowed view interacts
+    // poorly (title bar, resize, partial-screen pointer mapping).  This
+    // must run AFTER the activation calls above -- a window that is not
+    // yet key in an active, regular-policy app ignores -toggleFullScreen:,
+    // which was why an earlier toggle from setupGraphicWindow appeared to
+    // do nothing.  The window is made FullScreenPrimary-eligible in
+    // createMainWindowWithTitle:.  Honors 9VZ_NOFULLSCREEN=1 to stay windowed.
+    if (getenv("9VZ_NOFULLSCREEN") == NULL) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (([self->_window styleMask] & NSWindowStyleMaskFullScreen) == 0)
+                [self->_window toggleFullScreen:nil];
+        });
+    }
 }
 
 - (void)windowWillClose:(NSNotification *)notification
@@ -446,17 +469,6 @@ static NSString *const Space2ToolbarIdentifier = @"Space2";
     [_window setDelegate:self];
     [_window makeKeyAndOrderFront:nil];
 
-    // 9vz: start the VM window fullscreen.  The windowed view interacts
-    // poorly (title bar, resize, partial-screen pointer mapping).  Toggle
-    // on the main queue after the window is on screen.  Honors
-    // 9VZ_NOFULLSCREEN=1 to keep the old windowed behavior.
-    if (getenv("9VZ_NOFULLSCREEN") == NULL) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (([_window styleMask] & NSWindowStyleMaskFullScreen) == 0)
-                [_window toggleFullScreen:nil];
-        });
-    }
-
     // This code to prevent crash when called applicationShouldTerminateAfterLast_windowClosed.
     // https://stackoverflow.com/a/13470694
     [_window setReleasedWhenClosed:NO];
@@ -495,6 +507,12 @@ static NSString *const Space2ToolbarIdentifier = @"Space2";
                                                       backing:NSBackingStoreBuffered
                                                         defer:NO] autorelease];
     [window setTitle:title];
+    // 9vz: make the window eligible for the native (green-button)
+    // fullscreen transition.  Without FullScreenPrimary in the
+    // collection behavior, -toggleFullScreen: is silently a no-op,
+    // which is why the start-fullscreen patch appeared to do nothing
+    // and the VM stayed windowed.
+    [window setCollectionBehavior:[window collectionBehavior] | NSWindowCollectionBehaviorFullScreenPrimary];
     return window;
 }
 
