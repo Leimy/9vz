@@ -140,10 +140,15 @@ virtio-console serial port wired to the terminal in raw mode. Dependencies
 (the Code-Hex/vz bindings and x/sys) are vendored and pinned, so the build is
 `go build -mod=vendor` plus `codesign` with the
 `com.apple.security.virtualization` entitlement -- all wrapped by `make build`.
-The vendored vz bindings carry two local edits (applied by patches/apply.sh
+The vendored vz bindings carry local edits (applied by patches/apply.sh
 during `make vendor`): the VZVirtualMachineView's automaticallyReconfiguresDisplay
-is turned off so the `-scale` HiDPI scanout actually sticks, and the window
-starts fullscreen. Ctrl-C requests a stop; twice forces exit.
+is turned off so the `-scale` HiDPI scanout actually sticks, and an attempt
+to make the window start in a real fullscreen Space. The fullscreen attempt
+is NOT WORKING YET -- today the toggle only produces a maximized window over
+the current desktop, not a dedicated fullscreen Space; see the README
+("Fullscreen window") and the working notes
+(/usr/dave/9vz-audio-and-fullscreen.md, section (a)). Ctrl-C requests a stop;
+twice forces exit.
 
 The same harness boots stock Linux — which is not a side feature but a
 debugging instrument: it's how the hardware survey was done, and it remains
@@ -267,8 +272,11 @@ What remains, in priority order:
    "Current state" notes above and the gist.  The achievable workaround is
    guest-side modifier synthesis (Option/Command -> button 2/3 into
    /dev/mousein), not yet implemented.
-2. HiDPI ergonomics: handled host-side via `-scale` (smaller scanout, upscaled)
-   plus a fullscreen window; see the README.  No guest change needed.
+2. HiDPI ergonomics: handled host-side via `-scale` (smaller scanout,
+   upscaled); see the README.  No guest change needed.  A real fullscreen
+   Space to go with it is attempted but NOT WORKING YET (it only maximizes a
+   window over the current desktop); see the README "Fullscreen window" and
+   the working notes (/usr/dave/9vz-audio-and-fullscreen.md, section (a)).
 
 Note: a stray `-lobjc` duplicate-library linker *warning* during the build
 comes from the upstream bindings' cgo LDFLAGS, not this tree; it is harmless.

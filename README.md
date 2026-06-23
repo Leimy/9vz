@@ -42,10 +42,11 @@ tree -- no network, no surprise upgrades:
 
 The vendored Code-Hex/vz code is patched locally by
 patches/apply.sh (targeted awk edits, not a unified diff) to
-disable the view's automaticallyReconfiguresDisplay and to start
-the window fullscreen -- both needed for a readable -gui console
-(see "HiDPI / tiny fonts" below).  The edits are applied as part
-of `make vendor`, and are idempotent.
+disable the view's automaticallyReconfiguresDisplay (needed for a
+readable -gui console; see "HiDPI / tiny fonts" below) and to try
+to start the window fullscreen (NOT fully working yet; see
+"Fullscreen window").  The edits are applied as part of
+`make vendor`, and are idempotent.
 
 You only need the steps below when DELIBERATELY changing a
 pinned dependency version (edit VZ_VERSION / SYS_VERSION first):
@@ -106,9 +107,10 @@ Flags:
                     them (see "Native graphics" below).
     -width  px      graphics width (default 1440): sets the initial
     -height px      window size AND, divided by -scale, the guest
-                    scanout (height default 900).  The window starts
-                    fullscreen (see "Fullscreen window"), so these
-                    mainly fix the display aspect ratio and the
+                    scanout (height default 900).  The window tries
+                    to start fullscreen (see "Fullscreen window";
+                    not fully working yet), so these mainly fix the
+                    display aspect ratio and the
                     guest pixel grid.  The default is a 16:10
                     laptop-native shape (1440x900).  The guest kernel
                     adopts the host scanout size via the virtio-gpu
@@ -218,17 +220,36 @@ console font is fixed (e.g. the Alpine text console).
 
 Fullscreen window
 ------------------
-The -gui window now starts FULLSCREEN.  The windowed VZ view
-interacts poorly -- title bar, manual resize, and partial-screen
-pointer mapping all get in the way -- so 9vz hands the guest the
-whole panel at launch.  Combined with the scanout fix above, the
-fixed low-res scanout is upscaled to fill the screen (big and
-readable) instead of the guest being reconfigured back to native
-Retina density.
+GOAL: the -gui window should start in a REAL macOS fullscreen --
+its own dedicated Space (virtual desktop), menu bar and Dock
+hidden -- because the windowed VZ view interacts poorly (title
+bar, manual resize, partial-screen pointer mapping).  Combined
+with the scanout fix above, the fixed low-res scanout is then
+upscaled to fill the screen (big and readable) instead of the
+guest being reconfigured back to native Retina density.
 
-This is implemented by the same vendored edit (a toggleFullScreen:
-after the window is shown).  To keep the old windowed behavior for
-a single run, set the environment variable:
+STATUS: NOT WORKING YET.  Today the toggle fires but only produces
+a big window layered OVER the current desktop (an in-place
+"maximize"), not a real fullscreen Space -- a bit odd.  Two earlier
+bugs were fixed and ARE in place: the window is made
+FullScreenPrimary-eligible (without that collection behavior
+-toggleFullScreen: silently no-ops), and the toggle is fired from
+applicationDidFinishLaunching AFTER the app is activated (toggling
+before the window is key in an active, regular-policy app also
+no-ops).  Those got us from "nothing happens" to "wrong thing
+happens".
+
+The remaining suspect is VZApplication's hand-rolled
+nextEventMatchingMask run loop, which does not drive the native
+fullscreen Space transition.  A candidate fix (let AppKit own the
+loop via [super run]) is applied in the vendored edit but is
+UNTESTED -- it must be verified on the Mac, including that all VM
+exit/teardown paths still quit cleanly.  Full analysis and the
+fallback options live in the working notes
+(/usr/dave/9vz-audio-and-fullscreen.md, section (a)).
+
+To keep a plain window for a single run, set the environment
+variable:
 
     9VZ_NOFULLSCREEN=1 ./9vz -efi -gui -disk alpine.raw
 
@@ -363,6 +384,9 @@ Files
                        with -mod=vendor
     patches/apply.sh   local edits applied over ./vendor by
                        `make vendor` (vz view: no display
-                       auto-reconfigure + start fullscreen)
+                       auto-reconfigure; fullscreen-eligibility +
+                       post-activation toggle + AppKit-owned run
+                       loop -- real fullscreen Space not working
+                       yet, see "Fullscreen window")
     HISTORY.md         the original pre-port phase plan
     9front-on-vz.md    additional notes
