@@ -28,11 +28,12 @@
 #        2a. Make the window FullScreenPrimary-eligible in
 #            createMainWindowWithTitle: -- without this collection behavior
 #            -toggleFullScreen: is silently a no-op.
-#        2b. Fire the toggle from applicationDidFinishLaunching AFTER
-#            activateIgnoringOtherApps: -- toggling before the app is active
-#            and the window is key also no-ops.  (An earlier single edit that
-#            toggled from setupGraphicWindow, before activation, is why the VM
-#            stayed windowed despite the patch being "applied".)
+#        2b. Request fullscreen through a guarded scheduler after activation.
+#            A one-shot toggle from applicationDidFinishLaunching races AppKit
+#            window activation and can become an in-place maximize instead of
+#            a real fullscreen Space.  The scheduler waits until the app is
+#            active and the VM window is key/visible, retries briefly, and logs
+#            fullscreen delegate callbacks.
 #      Honors 9VZ_NOFULLSCREEN=1 to keep the old windowed behavior.
 #
 #   3. Let AppKit own the run loop ([super run]) instead of VZApplication's
@@ -113,31 +114,22 @@ else
 	exit 1
 fi
 
-# --- Edit 2b: toggle fullscreen after activation ---------------------------
+# --- Edit 2b: request fullscreen through a guarded scheduler ----------------
 # Anchor on the unique "[NSApp activateIgnoringOtherApps:YES];" line in
-# applicationDidFinishLaunching and insert the toggle right after it.  This
-# MUST come after activation: a window that is not yet key in an active,
-# regular-policy app ignores -toggleFullScreen:.
-if grep -q '9vz: start the VM window fullscreen' "$f"; then
+# applicationDidFinishLaunching and insert the scheduler call right after it.
+# The scheduler itself is inserted by edit 2c.
+if grep -q '\[self schedule9vzFullscreen\];' "$f"; then
 	echo "  [skip] fullscreen-on-launch toggle already present"
 elif grep -q '\[NSApp activateIgnoringOtherApps:YES\];' "$f"; then
 	awk '
 		!done && /\[NSApp activateIgnoringOtherApps:YES\];/ {
 			print
 			print ""
-			print "    // 9vz: start the VM window fullscreen.  The windowed view interacts"
-			print "    // poorly (title bar, resize, partial-screen pointer mapping).  This"
-			print "    // must run AFTER the activation calls above -- a window that is not"
-			print "    // yet key in an active, regular-policy app ignores -toggleFullScreen:,"
-			print "    // which was why an earlier toggle from setupGraphicWindow appeared to"
-			print "    // do nothing.  The window is made FullScreenPrimary-eligible in"
-			print "    // createMainWindowWithTitle:.  Honors 9VZ_NOFULLSCREEN=1 to stay windowed."
-			print "    if (getenv(\"9VZ_NOFULLSCREEN\") == NULL) {"
-			print "        dispatch_async(dispatch_get_main_queue(), ^{"
-			print "            if (([self->_window styleMask] & NSWindowStyleMaskFullScreen) == 0)"
-			print "                [self->_window toggleFullScreen:nil];"
-			print "        });"
-			print "    }"
+			print "    // 9vz: start the VM window fullscreen, but do it from the guarded"
+			print "    // scheduler below.  A one-shot toggle from here races AppKit window"
+			print "    // activation and sometimes becomes a plain maximized window rather"
+			print "    // than a native fullscreen Space."
+			print "    [self schedule9vzFullscreen];"
 			done = 1
 			next
 		}
@@ -149,6 +141,106 @@ else
 	echo "patches/apply.sh: could not find activateIgnoringOtherApps in $f" >&2
 	echo "  (vz layout changed?  re-check this patch against the new version)" >&2
 	exit 1
+fi
+
+# --- Edit 2c: add the fullscreen scheduler implementation ------------------
+# Adds ivars, init, and methods used by the scheduler call from edit 2b.
+if grep -q 'try9vzFullscreen' "$f"; then
+	echo "  [skip] fullscreen scheduler already present"
+else
+	awk '
+		!ivars && /id _mouseMovedMonitor;/ {
+			print
+			print "    BOOL _9vzFullscreenRequested;"
+			print "    NSInteger _9vzFullscreenAttempts;"
+			ivars = 1
+			next
+		}
+		!init && /_isZoomEnabled = NO;/ {
+			print
+			print "    _9vzFullscreenRequested = NO;"
+			print "    _9vzFullscreenAttempts = 0;"
+			init = 1
+			next
+		}
+		!methods && /^- \(void\)windowWillClose:\(NSNotification \*\)notification$/ {
+			print "- (void)applicationDidBecomeActive:(NSNotification *)notification"
+			print "{"
+			print "    [self schedule9vzFullscreen];"
+			print "}"
+			print ""
+			print "- (void)windowDidBecomeKey:(NSNotification *)notification"
+			print "{"
+			print "    [self schedule9vzFullscreen];"
+			print "}"
+			print ""
+			print "- (void)windowWillEnterFullScreen:(NSNotification *)notification"
+			print "{"
+			print "    NSLog(@\"9vz: windowWillEnterFullScreen\");"
+			print "}"
+			print ""
+			print "- (void)windowDidEnterFullScreen:(NSNotification *)notification"
+			print "{"
+			print "    NSLog(@\"9vz: windowDidEnterFullScreen\");"
+			print "}"
+			print ""
+			print "- (void)windowDidFailToEnterFullScreen:(NSWindow *)window"
+			print "{"
+			print "    NSLog(@\"9vz: windowDidFailToEnterFullScreen\");"
+			print "    _9vzFullscreenRequested = NO;"
+			print "}"
+			print ""
+			print "- (void)schedule9vzFullscreen"
+			print "{"
+			print "    if (getenv(\"9VZ_NOFULLSCREEN\") != NULL)"
+			print "        return;"
+			print "    if (_9vzFullscreenRequested || ([_window styleMask] & NSWindowStyleMaskFullScreen) != 0)"
+			print "        return;"
+			print ""
+			print "    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),"
+			print "                   dispatch_get_main_queue(), ^{"
+			print "        [self try9vzFullscreen];"
+			print "    });"
+			print "}"
+			print ""
+			print "- (void)try9vzFullscreen"
+			print "{"
+			print "    if (getenv(\"9VZ_NOFULLSCREEN\") != NULL)"
+			print "        return;"
+			print "    if (_9vzFullscreenRequested || ([_window styleMask] & NSWindowStyleMaskFullScreen) != 0)"
+			print "        return;"
+			print ""
+			print "    if (![NSApp isActive] || ![_window isVisible] || ![_window isKeyWindow]) {"
+			print "        if (_9vzFullscreenAttempts++ < 20) {"
+			print "            [_window makeKeyAndOrderFront:nil];"
+			print "            [NSApp activateIgnoringOtherApps:YES];"
+			print "            [self schedule9vzFullscreen];"
+			print "        } else {"
+			print "            NSLog(@\"9vz: fullscreen not attempted; app/window never became ready\");"
+			print "        }"
+			print "        return;"
+			print "    }"
+			print ""
+			print "    _9vzFullscreenRequested = YES;"
+			print "    NSLog(@\"9vz: requesting native fullscreen Space\");"
+			print "    [_window toggleFullScreen:nil];"
+			print "}"
+			print ""
+			methods = 1
+		}
+		{ print }
+		END {
+			if (!ivars || !init || !methods)
+				exit 42
+		}
+	' "$f" > "$f.tmp" || {
+		rm -f "$f.tmp"
+		echo "patches/apply.sh: could not insert fullscreen scheduler in $f" >&2
+		echo "  (vz layout changed?  re-check this patch against the new version)" >&2
+		exit 1
+	}
+	mv "$f.tmp" "$f"
+	echo "  [ok]   fullscreen scheduler inserted"
 fi
 
 # --- Edit 3: let AppKit own the run loop -----------------------------------

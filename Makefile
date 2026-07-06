@@ -12,6 +12,8 @@
 # the pinned versions, running `make deps vendor`, testing, and committing
 # the new vendor tree.
 BIN := 9vz
+INFO_PLIST := Info.plist
+INFO_PLIST_LDFLAGS := -extldflags=-Wl,-sectcreate,__TEXT,__info_plist,$(INFO_PLIST)
 
 # Pinned dependency versions. Change these on purpose, never automatically.
 VZ_VERSION  := v3.7.1
@@ -50,11 +52,12 @@ verify:
 	go build -mod=vendor -o /dev/null .
 
 # Virtualization.framework refuses unsigned clients, so build and codesign
-# with the com.apple.security.virtualization entitlement in one step.
+# with the com.apple.security.virtualization entitlement in one step. Embed
+# Info.plist too, so macOS TCC has an NSMicrophoneUsageDescription for -mic.
 # -mod=vendor forces the build to use the committed ./vendor tree.
 build:
-	go build -mod=vendor -o $(BIN) .
-	codesign --entitlements vz.entitlements -s - $(BIN)
+	go build -mod=vendor -ldflags '$(INFO_PLIST_LDFLAGS)' -o $(BIN) .
+	codesign -f --entitlements vz.entitlements -s - $(BIN)
 
 clean:
 	rm -f $(BIN) efistore.bin

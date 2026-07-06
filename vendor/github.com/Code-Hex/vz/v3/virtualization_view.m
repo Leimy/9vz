@@ -188,6 +188,8 @@
     NSTimer *_scrollTimer;
     NSPoint _scrollDelta;
     id _mouseMovedMonitor;
+    BOOL _9vzFullscreenRequested;
+    NSInteger _9vzFullscreenAttempts;
 }
 
 - (instancetype)initWithVirtualMachine:(VZVirtualMachine *)virtualMachine
@@ -228,6 +230,8 @@
     _pauseOverlayView = [self createPauseOverlayEffectView:_virtualMachineView];
     [_virtualMachineView addSubview:_pauseOverlayView];
     _isZoomEnabled = NO;
+    _9vzFullscreenRequested = NO;
+    _9vzFullscreenAttempts = 0;
     return self;
 }
 
@@ -406,19 +410,73 @@ static NSString *const Space2ToolbarIdentifier = @"Space2";
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     [NSApp activateIgnoringOtherApps:YES];
 
-    // 9vz: start the VM window fullscreen.  The windowed view interacts
-    // poorly (title bar, resize, partial-screen pointer mapping).  This
-    // must run AFTER the activation calls above -- a window that is not
-    // yet key in an active, regular-policy app ignores -toggleFullScreen:,
-    // which was why an earlier toggle from setupGraphicWindow appeared to
-    // do nothing.  The window is made FullScreenPrimary-eligible in
-    // createMainWindowWithTitle:.  Honors 9VZ_NOFULLSCREEN=1 to stay windowed.
-    if (getenv("9VZ_NOFULLSCREEN") == NULL) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (([self->_window styleMask] & NSWindowStyleMaskFullScreen) == 0)
-                [self->_window toggleFullScreen:nil];
-        });
+    // 9vz: start the VM window fullscreen, but do it from the guarded
+    // scheduler below.  A one-shot toggle from here races AppKit window
+    // activation and sometimes becomes a plain maximized window rather
+    // than a native fullscreen Space.
+    [self schedule9vzFullscreen];
+}
+
+- (void)applicationDidBecomeActive:(NSNotification *)notification
+{
+    [self schedule9vzFullscreen];
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification
+{
+    [self schedule9vzFullscreen];
+}
+
+- (void)windowWillEnterFullScreen:(NSNotification *)notification
+{
+    NSLog(@"9vz: windowWillEnterFullScreen");
+}
+
+- (void)windowDidEnterFullScreen:(NSNotification *)notification
+{
+    NSLog(@"9vz: windowDidEnterFullScreen");
+}
+
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window
+{
+    NSLog(@"9vz: windowDidFailToEnterFullScreen");
+    _9vzFullscreenRequested = NO;
+}
+
+- (void)schedule9vzFullscreen
+{
+    if (getenv("9VZ_NOFULLSCREEN") != NULL)
+        return;
+    if (_9vzFullscreenRequested || ([_window styleMask] & NSWindowStyleMaskFullScreen) != 0)
+        return;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self try9vzFullscreen];
+    });
+}
+
+- (void)try9vzFullscreen
+{
+    if (getenv("9VZ_NOFULLSCREEN") != NULL)
+        return;
+    if (_9vzFullscreenRequested || ([_window styleMask] & NSWindowStyleMaskFullScreen) != 0)
+        return;
+
+    if (![NSApp isActive] || ![_window isVisible] || ![_window isKeyWindow]) {
+        if (_9vzFullscreenAttempts++ < 20) {
+            [_window makeKeyAndOrderFront:nil];
+            [NSApp activateIgnoringOtherApps:YES];
+            [self schedule9vzFullscreen];
+        } else {
+            NSLog(@"9vz: fullscreen not attempted; app/window never became ready");
+        }
+        return;
     }
+
+    _9vzFullscreenRequested = YES;
+    NSLog(@"9vz: requesting native fullscreen Space");
+    [_window toggleFullScreen:nil];
 }
 
 - (void)windowWillClose:(NSNotification *)notification

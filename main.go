@@ -19,6 +19,11 @@
 // so it shows up in a real macOS window. Serial keeps flowing on stdio.
 // The guest needs drivers for those devices to use them; see the README
 // "Native graphics" section.
+//
+// With -audio, a virtio-sound device with a host speaker output stream
+// is attached (guest playback via the vz64 kernel's audiovz driver,
+// #A /dev/audio).  -mic also attaches a host microphone input stream
+// for guest capture. See the README "Audio" section.
 package main
 
 import (
@@ -46,18 +51,25 @@ var (
 	memGiB     = flag.Uint64("mem", 2, "guest memory in GiB")
 	noNet      = flag.Bool("nonet", false, "disable virtio-net (NAT)")
 	gui        = flag.Bool("gui", false, "open a graphics window (virtio-gpu + USB keyboard/mouse); serial still flows on stdio")
+	// Audio (virtio-sound).  -audio attaches a virtio-sound device with a
+	// host OUTPUT stream (guest -> Mac speaker); the guest's audiovz driver
+	// drives it as #A /dev/audio (playback).  -mic additionally attaches a
+	// host INPUT stream (Mac microphone -> guest) for capture. Mic capture
+	// also needs the
+	// com.apple.security.device.audio-input entitlement (see vz.entitlements)
+	// and triggers a macOS privacy prompt on first use.
+	audio = flag.Bool("audio", false, "attach a virtio-sound device with a host speaker output stream")
+	mic   = flag.Bool("mic", false, "also attach a host microphone input stream (implies -audio; needs the audio-input entitlement)")
 	// Default to a 16:10 laptop-native aspect ratio rather than the old
 	// 4:3 1024x768.  1440x900 is a common MacBook logical resolution and
 	// gives rio a roomier, modern shape.  The guest kernel adopts the
 	// host scanout size via GET_DISPLAY_INFO, so no kernel change is
 	// needed to follow this; override with -width/-height if desired.
 	// These set the initial window size AND the guest scanout size (the
-	// latter divided by -scale).  The window TRIES to start fullscreen (NOT
-	// WORKING YET -- it only maximizes over the current desktop, not a real
-	// fullscreen Space; see the README "Fullscreen window" and
-	// /usr/dave/9vz-audio-and-fullscreen.md section (a)), so these mainly fix
-	// the display aspect ratio and the guest's pixel grid; set
-	// 9VZ_NOFULLSCREEN=1 to keep a plain window of this size.
+	// latter divided by -scale).  The vendored VZ window code tries to start
+	// fullscreen through a guarded AppKit scheduler; see the README
+	// "Fullscreen window".  Set 9VZ_NOFULLSCREEN=1 to keep a plain window of
+	// this size.
 	width  = flag.Int("width", 1440, "graphics width (-gui): window size and, /scale, the guest scanout")
 	height = flag.Int("height", 900, "graphics height (-gui): window size and, /scale, the guest scanout")
 	// HiDPI / font-size scaling for the -gui console.
@@ -187,6 +199,45 @@ func main() {
 	if vs, err := vz.NewVirtioSocketDeviceConfiguration(); err == nil {
 		config.SetSocketDevicesVirtualMachineConfiguration(
 			[]vz.SocketDeviceConfiguration{vs})
+	}
+
+	// --- audio (virtio-sound) ---
+	//
+	// A single virtio-sound device (PCI 1AF4:1059) with a host OUTPUT
+	// stream (speaker) and, with -mic, a host INPUT stream (microphone).
+	// In the guest this is the vz64 kernel's audiovz driver: #A
+	// /dev/audio (playback).  -mic implies -audio.  The guest is
+	// expected to enumerate two streams when -mic is used: output first,
+	// then input.
+	if *mic {
+		*audio = true
+	}
+	if *audio {
+		snd, err := vz.NewVirtioSoundDeviceConfiguration()
+		if err != nil {
+			log.Fatalf("virtio-sound: %v", err)
+		}
+		streams := []vz.VirtioSoundDeviceStreamConfiguration{}
+		out, err := vz.NewVirtioSoundDeviceHostOutputStreamConfiguration()
+		if err != nil {
+			log.Fatalf("audio output stream: %v", err)
+		}
+		streams = append(streams, out)
+		if *mic {
+			in, err := vz.NewVirtioSoundDeviceHostInputStreamConfiguration()
+			if err != nil {
+				log.Fatalf("audio input stream: %v", err)
+			}
+			streams = append(streams, in)
+		}
+		snd.SetStreams(streams...)
+		config.SetAudioDevicesVirtualMachineConfiguration(
+			[]vz.AudioDeviceConfiguration{snd})
+		if *mic {
+			fmt.Fprintln(os.Stderr, "9vz: audio: virtio-sound with speaker + microphone")
+		} else {
+			fmt.Fprintln(os.Stderr, "9vz: audio: virtio-sound with speaker (output only)")
+		}
 	}
 
 	// --- graphics + input (only in -gui mode) ---

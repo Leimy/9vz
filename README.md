@@ -105,6 +105,16 @@ Flags:
                     console still flows on stdio in parallel.  The
                     guest needs drivers for these devices to use
                     them (see "Native graphics" below).
+    -audio          attach a virtio-sound device with a host speaker
+                    output stream (guest playback).  In the guest this
+                    is #A /dev/audio via the vz64 audiovz driver.  See
+                    "Audio" below.
+    -mic            also attach a host microphone input stream (implies
+                    -audio).  Capture is wired on the HOST only -- the
+                    guest driver is playback-only so far -- and needs the
+                    com.apple.security.device.audio-input entitlement plus
+                    a one-time macOS microphone privacy grant.  See
+                    "Audio" below.
     -width  px      graphics width (default 1440): sets the initial
     -height px      window size AND, divided by -scale, the guest
                     scanout (height default 900).  The window tries
@@ -228,23 +238,23 @@ with the scanout fix above, the fixed low-res scanout is then
 upscaled to fill the screen (big and readable) instead of the
 guest being reconfigured back to native Retina density.
 
-STATUS: NOT WORKING YET.  Today the toggle fires but only produces
-a big window layered OVER the current desktop (an in-place
-"maximize"), not a real fullscreen Space -- a bit odd.  Two earlier
-bugs were fixed and ARE in place: the window is made
-FullScreenPrimary-eligible (without that collection behavior
--toggleFullScreen: silently no-ops), and the toggle is fired from
-applicationDidFinishLaunching AFTER the app is activated (toggling
-before the window is key in an active, regular-policy app also
-no-ops).  Those got us from "nothing happens" to "wrong thing
-happens".
+STATUS: EXPERIMENTAL.  Earlier attempts got from "nothing happens"
+to "wrong thing happens": the toggle fired but sometimes produced a
+big window layered OVER the current desktop (an in-place
+"maximize"), not a real fullscreen Space.  Three fixes are now in
+the vendored VZ window edit:
 
-The remaining suspect is VZApplication's hand-rolled
-nextEventMatchingMask run loop, which does not drive the native
-fullscreen Space transition.  A candidate fix (let AppKit own the
-loop via [super run]) is applied in the vendored edit but is
-UNTESTED -- it must be verified on the Mac, including that all VM
-exit/teardown paths still quit cleanly.  Full analysis and the
+  * the window is FullScreenPrimary-eligible (without that
+    collection behavior -toggleFullScreen: silently no-ops),
+  * VZApplication uses AppKit's own [super run] loop instead of a
+    hand-rolled nextEventMatchingMask loop,
+  * fullscreen is requested through a guarded scheduler that waits
+    until the app is active and the VM window is visible/key,
+    retries briefly, and logs windowWill/DidEnterFullScreen.
+
+This needs live verification on the Mac.  If it still maximizes
+instead of entering its own Space, the next useful data is the
+9vz fullscreen log lines around launch.  Full analysis and the
 fallback options live in the working notes
 (/usr/dave/9vz-audio-and-fullscreen.md, section (a)).
 
@@ -281,6 +291,10 @@ main.go builds a VZVirtualMachineConfiguration with:
   * Entropy: virtio-entropy.
   * vsock: a virtio-socket device, attached for the eventual
     9P-over-vsock control plane (unused so far).
+  * Audio (with -audio/-mic): a virtio-sound device with a host
+    speaker output stream and, with -mic, a host microphone input
+    stream.  Driven in the guest by the vz64 audiovz driver as #A
+    /dev/audio.  See "Audio" below.
 
 After config validation it starts the VM and sits in a loop
 multiplexing OS signals against the VM state channel, printing
@@ -368,13 +382,50 @@ Host side (this repo, done):
     the serial/state loop moves to a goroutine so stdio keeps
     working.
 
+Audio
+-----
+The -audio flag attaches a virtio-sound device (PCI 1AF4:1059) with a
+host OUTPUT stream, so the guest can play audio to the Mac's speaker.
+In the guest, the vz64 kernel's audiovz driver presents this as the
+standard audio(3) interface: #A bound at /dev/audio (write PCM to play),
+plus /dev/volume, /dev/audioctl and /dev/audiostat.  The guest driver is
+S16_LE / 48000 Hz / stereo (it probes 44100 Hz as a fallback).
+
+    ./9vz -audio -kernel 9vz.bin -disk 9front.raw -cmdline '...'
+    # in the guest:  play foo.wav   (or: cat foo.pcm > /dev/audio)
+
+-audio works with or without -gui.  Playback needs no special
+entitlement.
+
+-mic additionally attaches a host INPUT stream (the Mac microphone ->
+guest) and implies -audio.  The host exposes both streams on one
+virtio-sound device, so the guest should report stream 0 as output and
+stream 1 as input.  Microphone capture requires the
+com.apple.security.device.audio-input entitlement (already in
+vz.entitlements, applied at codesign time).  The binary also embeds a
+minimal Info.plist with NSMicrophoneUsageDescription so macOS TCC can ask
+for microphone consent on first use.
+
+Status at a glance:
+
+  [done]    host side: -audio / -mic wiring in main.go, mic entitlement
+  [done]    guest side: audiovz playback/capture driver (#A /dev/audio),
+            built into the vz64 kernel
+  [open]    end-to-end playback not yet confirmed on hardware (the real
+            unknown is how strict Apple's virtio-sound backend is about
+            PCM_INFO / SET_PARAMS; the guest driver probes a candidate
+            format list and logs each control reply for bring-up)
+  [open]    end-to-end capture validation on hardware (confirm stream 1
+            dir 1 in /dev/kmesg, then read PCM from the guest rxq)
+
 Files
 -----
     main.go            the harness (boot loaders, devices, the
-                       -gui graphics/input wiring, signal and
-                       state loop)
+                       -gui graphics/input wiring, the -audio/-mic
+                       virtio-sound wiring, signal and state loop)
     termios_darwin.go  raw-mode ioctl constants
-    vz.entitlements    com.apple.security.virtualization
+    vz.entitlements    com.apple.security.virtualization +
+                       com.apple.security.device.audio-input (for -mic)
     check_kernel.sh    arm64 Image header inspector
     fixer.py           extract a bootable Image from a gzip-wrapped
                        distro vmlinuz (e.g. Alpine) for -kernel boot

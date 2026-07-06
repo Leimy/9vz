@@ -4,5 +4,16 @@
 <dict>
 	<key>com.apple.security.virtualization</key>
 	<true/>
+	<!--
+		Microphone capture for -mic (virtio-sound host input stream).
+		Playback (-audio) needs no entitlement; only capture does.
+		Even with this key, macOS gates the FIRST capture behind a TCC
+		privacy prompt (a bare Go CLI has no NSMicrophoneUsageDescription,
+		so add the binary by hand under System Settings -> Privacy &
+		Security -> Microphone if no prompt appears).  Harmless to carry
+		when -mic is unused.
+	-->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
 </dict>
 </plist>
