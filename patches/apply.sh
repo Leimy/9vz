@@ -322,4 +322,55 @@ else
 	exit 1
 fi
 
+# --- Edit 4: add VirtioSocketConnection.File() (socket_9vz.go) -------------
+# The drawterm console (console.go) passes an accepted guest connection to a
+# drawterm child process on fds 0/1, which requires a real file descriptor.
+# VirtioSocketConnection keeps its net.Conn (rawConn, a *net.UnixConn)
+# unexported, so we add a File() accessor in a new file in the vendored
+# package.  A whole-file heredoc rather than a text edit: `go mod vendor`
+# deletes the file, and recreating it is simpler and more robust than
+# patching socket.go.
+g="vendor/github.com/Code-Hex/vz/v3/socket_9vz.go"
+if [ -f "$g" ]; then
+	echo "  [skip] socket_9vz.go already present"
+else
+	cat > "$g" <<'EOF'
+package vz
+
+// socket_9vz.go - 9vz local addition to the vendored Code-Hex/vz code.
+//
+// Re-created by patches/apply.sh after every `go mod vendor` (which
+// rewrites the vendor tree and would drop this file).
+//
+// VirtioSocketConnection wraps its connection (rawConn, a *net.UnixConn
+// built by net.FileConn over the descriptor handed out by
+// Virtualization.framework) without exporting it, so there is no public
+// way to recover a file descriptor suitable for handing to a child
+// process with dup2+exec.  9vz's drawterm console (console.go) needs
+// exactly that: the accepted guest connection is passed to a drawterm
+// child on fds 0/1.  File() exposes the standard net.UnixConn File()
+// escape hatch, which returns a dup'd *os.File: closing the
+// VirtioSocketConnection afterwards does not invalidate the returned
+// file, and vice versa.
+
+import (
+	"fmt"
+	"os"
+)
+
+// File returns a duplicated *os.File for the connection's underlying
+// socket, suitable for passing to a child process.  The caller owns the
+// returned file and must close it.  The connection itself remains valid
+// and must still be closed separately.
+func (v *VirtioSocketConnection) File() (*os.File, error) {
+	f, ok := v.rawConn.(interface{ File() (*os.File, error) })
+	if !ok {
+		return nil, fmt.Errorf("vz: connection type %T does not expose a file descriptor", v.rawConn)
+	}
+	return f.File()
+}
+EOF
+	echo "  [ok]   socket_9vz.go added"
+fi
+
 echo "patches/apply.sh: done."

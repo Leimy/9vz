@@ -97,6 +97,28 @@ var (
 	// and is upscaled by the view.  (A real fullscreen Space for that view is
 	// attempted but NOT WORKING YET; see the README "Fullscreen window".)
 	scale = flag.Float64("scale", 1, "HiDPI scale factor for -gui: guest renders at width/scale x height/scale and the window upscales it (>1 = bigger font)")
+	// Pasteboard bridge (snarffs ↔ NSPasteboard).  When enabled, 9vz
+	// accepts one guest vsock connection on port 9001 and synchronises the
+	// macOS general pasteboard with the guest snarf buffer.  The guest side
+	// is snarflink/snarffs (see devsock.md §5.4).  Failure to set up the
+	// vsock listener is fatal when this flag is set.
+	pbd = flag.Bool("pbd", false, "enable the snarf↔pasteboard bridge (vsock port 9001; requires snarffs/snarflink in the guest)")
+	// drawterm console (vsock port 9004).  When enabled, 9vz listens for
+	// guest connections on port 9004 and spawns one drawterm process per
+	// accepted connection, with the connection on the child's fds 0/1
+	// (drawterm's -0 flag).  The guest side is the vzcons supervisor.
+	// See console.go and drawterm-console.md.
+	console    = flag.Bool("console", false, "enable the drawterm console (vsock port 9004; requires vzcons in the guest and a -0 capable drawterm)")
+	drawterm   = flag.String("drawterm", "drawterm", "path to the drawterm binary spawned by -console (resolved via $PATH if bare)")
+	consoleLog = flag.String("consolelog", "/tmp/9vz-drawterm.log", "file receiving the stderr of drawterm children spawned by -console (empty = 9vz's stderr)")
+	// Echo test listeners, port 9200: vsock (for vsping(1)) and plain
+	// TCP with TCP_NODELAY set (for tcping(1), a fair TCP comparison
+	// point -- see devsock.md and echod.go's startTCPEcho comment for
+	// why NODELAY matters).  Pure test plumbing: every accepted
+	// connection, on either transport, has its bytes echoed straight
+	// back.  Used for the milestone 5 latency calibration and for
+	// flow-control tests.
+	echoSrv = flag.Bool("echo", false, "enable the vsock + plain-TCP echo test listeners on port 9200 (for guest vsping/tcping)")
 )
 
 // AppKit (NSApplication / [NSApp run], used by StartGraphicApplication in
@@ -119,6 +141,20 @@ func main() {
 	flag.Parse()
 	log.SetFlags(0)
 	log.SetPrefix("9vz: ")
+
+	// -drawterm and -consolelog only matter with -console; giving one
+	// explicitly without -console is almost certainly a mistake (no
+	// listener is registered, so the guest's vzcons dial just gets
+	// "connection refused").  Treat an explicit -drawterm/-consolelog
+	// as implying -console, and say so.
+	if !*console {
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "drawterm" || f.Name == "consolelog" {
+				*console = true
+				log.Printf("-%s given without -console; enabling -console", f.Name)
+			}
+		})
+	}
 
 	if !*useEFI && *kernelPath == "" {
 		log.Fatal("need -kernel for direct boot, or -efi for firmware boot")
@@ -304,6 +340,39 @@ func main() {
 		log.Fatalf("vm creation: %v", err)
 	}
 
+	// --- pasteboard bridge (vsock port 9001) ---
+	//
+	// startPBD must be called after NewVirtualMachine (so SocketDevices() is
+	// available) and before vm.Start (so the listener is registered before
+	// the guest can dial).  If -pbd is not set, pbdBridge is nil and
+	// runStateLoop is a no-op with respect to it.
+	var pbdBridge *pbdState
+	if *pbd {
+		pbdBridge = startPBD(vm)
+		fmt.Fprintln(os.Stderr, "9vz: pbd: snarf↔pasteboard bridge enabled (vsock port 9001)")
+	}
+
+	// --- drawterm console (vsock port 9004) ---
+	//
+	// Same registration window as pbd: after NewVirtualMachine, before
+	// vm.Start, so the listener exists before the guest can dial.
+	var consoleSrv *consoleState
+	if *console {
+		consoleSrv = startConsole(vm, *drawterm, *consoleLog)
+		fmt.Fprintln(os.Stderr, "9vz: console: drawterm console enabled (vsock port 9004)")
+	}
+
+	// --- echo test listener (vsock port 9200) ---
+	//
+	// Same registration window as pbd: after NewVirtualMachine, before
+	// vm.Start.
+	if *echoSrv {
+		startEcho(vm)
+		fmt.Fprintln(os.Stderr, "9vz: echo: vsock echo test listener enabled (port 9200)")
+		startTCPEcho()
+		fmt.Fprintln(os.Stderr, "9vz: echo: plain TCP echo test listener enabled (port 9200, TCP_NODELAY)")
+	}
+
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -318,7 +387,7 @@ func main() {
 	// until the window closes (or the guest stops). In headless mode the
 	// multiplexer simply runs on the main goroutine as before.
 	if *gui {
-		go runStateLoop(vm, sigCh, restore)
+		go runStateLoop(vm, sigCh, restore, pbdBridge, consoleSrv)
 		err := vm.StartGraphicApplication(
 			float64(*width), float64(*height),
 			vz.WithWindowTitle("9vz"),
@@ -333,19 +402,30 @@ func main() {
 		return
 	}
 
-	runStateLoop(vm, sigCh, restore)
+	runStateLoop(vm, sigCh, restore, pbdBridge, consoleSrv)
 }
 
 // runStateLoop multiplexes OS signals against the VM state channel: the first
 // interrupt requests a graceful stop, the second forces exit, and a Stopped
 // transition ends the process. restore (may be nil) puts the terminal back.
-func runStateLoop(vm *vz.VirtualMachine, sigCh <-chan os.Signal, restore func()) {
+// bridge (may be nil) is the pasteboard bridge and consoleSrv (may be nil)
+// the drawterm console; both are stopped before exit.
+func runStateLoop(vm *vz.VirtualMachine, sigCh <-chan os.Signal, restore func(), bridge *pbdState, consoleSrv *consoleState) {
+	stopAux := func() {
+		if bridge != nil {
+			bridge.stop()
+		}
+		if consoleSrv != nil {
+			consoleSrv.stop()
+		}
+	}
 	stopping := false
 	for {
 		select {
 		case <-sigCh:
 			if stopping {
 				log.Println("force exit")
+				stopAux()
 				if restore != nil {
 					restore()
 				}
@@ -361,9 +441,11 @@ func runStateLoop(vm *vz.VirtualMachine, sigCh <-chan os.Signal, restore func())
 			case vz.VirtualMachineStateRunning:
 				log.Println("state: running")
 			case vz.VirtualMachineStateError:
+				stopAux()
 				log.Fatal("state: error")
 			case vz.VirtualMachineStateStopped:
 				log.Println("state: stopped")
+				stopAux()
 				if restore != nil {
 					restore()
 				}
