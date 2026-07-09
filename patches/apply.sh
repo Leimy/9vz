@@ -373,4 +373,50 @@ EOF
 	echo "  [ok]   socket_9vz.go added"
 fi
 
+# --- Edit 5: retain the accepted VZVirtioSocketConnection ------------------
+# In vendor/.../virtualization_11.m the listener delegate hands the accepted
+# VZVirtioSocketConnection to Go, which flattens it to a dup'd fd (socket.go
+# newVirtioSocketConnection) and never references the objc object again.
+# Nobody retains it (the file is compiled -fno-objc-arc), so it is dealloc'd
+# at the next autorelease-pool drain on the VM dispatch queue -- an
+# unpredictable moment (~30-100s observed, varying with VM activity) -- and
+# that dealloc tears down the virtio connection even though dup'd fds are
+# still open in the drawterm console child.  Symptom: healthy console window
+# dies out of the blue; guest sees "vsock: connection reset", drawterm sees
+# EOF on exportfs.  Fix: retain the connection before calling into Go.
+# Deliberate leak (one small objc object per accepted session): releasing it
+# later would be worse, since dealloc close()es the connection's original fd
+# NUMBER, which may have been reused by an unrelated descriptor by then.
+h="vendor/github.com/Code-Hex/vz/v3/virtualization_11.m"
+if [ ! -f "$h" ]; then
+	echo "patches/apply.sh: $h not found (run 'go mod vendor' first)" >&2
+	exit 1
+fi
+if grep -q '9vz: retain the accepted connection' "$h"; then
+	echo "  [skip] connection retain already present"
+elif grep -q 'return (BOOL)shouldAcceptNewConnectionHandler(_cgoHandle, connection, socketDevice);' "$h"; then
+	awk '
+		!done && /return \(BOOL\)shouldAcceptNewConnectionHandler\(_cgoHandle, connection, socketDevice\);/ {
+			print "    // 9vz: retain the accepted connection for the life of the process."
+			print "    // The Go side flattens it to a dup'\''d fd and never references the"
+			print "    // objc object again; unretained, it is dealloc'\''d at the next"
+			print "    // autorelease-pool drain on the VM dispatch queue, tearing down the"
+			print "    // virtio connection under the drawterm console child'\''s dup'\''d fds."
+			print "    // Deliberate leak: one small objc object per accepted session."
+			print "    // See patches/apply.sh edit 5 for the full story."
+			print "    [connection retain];"
+			print
+			done = 1
+			next
+		}
+		{ print }
+	' "$h" > "$h.tmp"
+	mv "$h.tmp" "$h"
+	echo "  [ok]   connection retain added"
+else
+	echo "patches/apply.sh: could not find shouldAcceptNewConnectionHandler call in $h" >&2
+	echo "  (vz layout changed?  re-check this patch against the new version)" >&2
+	exit 1
+fi
+
 echo "patches/apply.sh: done."

@@ -5,6 +5,36 @@
 //
 
 #import "virtualization_11.h"
+#import <objc/runtime.h>
+
+// 9vz: dealloc canary for accepted vsock connections (debug aid).
+// The listener delegate below retains every accepted
+// VZVirtioSocketConnection for the life of the process, so its dealloc
+// should never run.  If it runs anyway, the framework (or an
+// over-release somewhere) ended the connection object's lifetime
+// despite the retain -- exactly the event to catch while debugging
+// console session teardown.  The canary is an associated object with
+// RETAIN policy: it is released precisely when its owner deallocs, so
+// its dealloc logging fires iff the connection deallocs.  Remove this
+// (and the arming code in the delegate) once the lifetime question is
+// settled.
+static char dtConnCanaryKey;
+
+@interface DTConnCanary : NSObject
+{
+@public
+    void *owner;
+    int fd;
+}
+@end
+
+@implementation DTConnCanary
+- (void)dealloc
+{
+    NSLog(@"9vz: console: VZVirtioSocketConnection %p (fd %d) DEALLOC'd despite retain -- connection lifetime bug still live", owner, fd);
+    [super dealloc];
+}
+@end
 
 @implementation Observer
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context;
@@ -156,6 +186,33 @@
 
 - (BOOL)listener:(VZVirtioSocketListener *)listener shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection fromSocketDevice:(VZVirtioSocketDevice *)socketDevice;
 {
+    // 9vz: retain the accepted connection for the life of the process.
+    // The Go side (socket.go newVirtioSocketConnection) flattens the
+    // connection to a dup'd file descriptor and never references the
+    // objc object again; nobody else retains it either (this file is
+    // compiled -fno-objc-arc).  Left alone, it is dealloc'd at the next
+    // autorelease-pool drain on the VM dispatch queue -- an unpredictable
+    // moment (~30-100s observed, varying with VM activity) -- which tears
+    // down the virtio connection even though dup'd fds are still open in
+    // the process that inherited them (9vz's drawterm console child).
+    // This is a deliberate leak: one small objc object per accepted
+    // console session, human-scale.  Releasing it later would be worse:
+    // dealloc close()es the connection's original fd NUMBER, which by
+    // then may have been reused by an unrelated descriptor.
+    [connection retain];
+    {
+        // 9vz: accept-time log + dealloc canary (see DTConnCanary above).
+        // The log line doubles as positive proof that the patched binding
+        // is in the RUNNING binary: if a session dies and 9vz's stderr
+        // never printed this line at accept time, the retain fix was not
+        // live and no conclusion about it is valid.
+        DTConnCanary *canary = [[DTConnCanary alloc] init];
+        canary->owner = connection;
+        canary->fd = (int)[connection fileDescriptor];
+        objc_setAssociatedObject(connection, &dtConnCanaryKey, canary, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [canary release];
+        NSLog(@"9vz: console: accepted vsock connection %p (fd %d): retained, canary armed", connection, canary->fd);
+    }
     return (BOOL)shouldAcceptNewConnectionHandler(_cgoHandle, connection, socketDevice);
 }
 @end

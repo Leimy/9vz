@@ -29,6 +29,10 @@
 //     causes the guest to re-dial and a fresh window to appear —
 //     getty-style respawn.  A "window wanted" gate (menu item, signal)
 //     can be added later without touching the guest.
+//   - The framework's VZVirtioSocketConnection objc object is retained
+//     by the patched binding (patches/apply.sh edit 5); without that,
+//     the framework tears the connection down at an unpredictable
+//     autorelease-pool drain and kills healthy sessions.  See spawn().
 //   - When the child exits, 9vz closes its side of the connection; the
 //     guest session sees the hangup and the supervisor re-arms.  When
 //     the connection dies first (guest reboot), drawterm's exportfs
@@ -143,13 +147,30 @@ func (s *consoleState) runAcceptLoop() {
 
 // spawn runs one drawterm child for one guest connection and reaps it.
 func (s *consoleState) spawn(conn *vz.VirtioSocketConnection) {
-	// Dup the descriptor out of the binding's net.Conn: the wrapper
-	// owns its fd and may close it on GC or Close, so the child must
-	// get an independent dup (File() provides one).
+	// Close our copy of the connection only after the child exits,
+	// so a child exit still propagates hangup to the guest promptly.
+	//
+	// NOTE conn is NOT what keeps the session alive.  The binding
+	// flattens the framework's VZVirtioSocketConnection to a dup'd
+	// fd (socket.go newVirtioSocketConnection); the Go wrapper holds
+	// no objc reference and has no finalizer.  Left unretained, the
+	// objc object is dealloc'd at the next autorelease-pool drain on
+	// the VM dispatch queue (~30-100s observed, varying with VM
+	// activity), which tears down the virtio connection even though
+	// the child holds dup'd fds: the guest saw "vsock: connection
+	// reset", drawterm saw EOF on exportfs and died.  The real fix
+	// is in the vendored binding (patches/apply.sh edit 5): the
+	// listener delegate retains the connection object.  An earlier
+	// theory blamed GC of this Go wrapper; holding it here (this
+	// deferred Close) turned out to be necessary hygiene but not
+	// sufficient -- it keeps a dup'd fd alive, not the objc object.
+	defer conn.Close()
+
+	// Dup the descriptor out of the binding's net.Conn so the child
+	// gets an independent fd (File() provides the dup).
 	f, err := conn.File()
 	if err != nil {
 		log.Printf("console: cannot get connection fd: %v", err)
-		conn.Close()
 		return
 	}
 
@@ -173,11 +194,10 @@ func (s *consoleState) spawn(conn *vz.VirtioSocketConnection) {
 
 	err = cmd.Start()
 
-	// The child holds its own dups after Start; close the parent's
-	// copies now so the child alone decides the connection's lifetime
-	// (and so a child exit propagates hangup to the guest promptly).
+	// The child holds its own dups after Start; the parent's copy of
+	// the dup'd fd and the log fd can go now.  conn itself must NOT
+	// be closed here — see the comment at the top of this function.
 	f.Close()
-	conn.Close()
 	if logf != nil {
 		logf.Close()
 	}
